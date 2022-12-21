@@ -9,6 +9,7 @@ import pprint
 import string
 import spacy
 import re
+import os
 
 NUMBERS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
@@ -80,6 +81,16 @@ def main():
 
     keywords = df["final_tokenized"]
 
+    # Create required folders
+    if not os.path.exists("./models"):
+        os.makedirs("./models")
+        os.makedirs("./models/lsi")
+        os.makedirs("./models/tfidf")
+    elif not os.path.exists("./models/lsi"):
+        os.makedirs("./models/lsi")
+        if not os.path.exists("./models/tfidf"):
+            os.makedirs("./models/tfidf")
+
     # creating term dictionary
     dictionary = corpora.Dictionary(keywords)
     dictionary.save("./models/dictionary")
@@ -115,7 +126,7 @@ def main():
         ebebek_lsi_corpus, num_features=ebebek_lsi_corpus.num_terms)
     malzeme_index.save("./models/malzeme_index")
     print("Malzeme index saved!")
-    
+
 
 if __name__ == "__main__":
     main()
