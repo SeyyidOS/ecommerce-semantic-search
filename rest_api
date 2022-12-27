@@ -1,0 +1,175 @@
+# Libraries
+from flask_restful import Api, Resource, reqparse
+from TurkishStemmer import TurkishStemmer
+from collections import Counter
+from operator import itemgetter
+from flask import Flask
+
+import pandas as pd
+import gensim
+import pprint
+import string
+import spacy
+import time
+import json
+import re
+
+NUMBERS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+spacy_nlp = spacy.blank('tr')
+stop_words = list(spacy_nlp.Defaults.stop_words)
+pp = pprint.PrettyPrinter(indent=4)
+punctuations = string.punctuation
+stemmer = TurkishStemmer()
+app = Flask(__name__)
+api = Api(app)
+
+with open('bag_of_words_spellcheck.json') as json_file:
+    data = json.load(json_file)
+WORDS = Counter(data)
+WORDS['bez'] = 999999
+
+@app.route('/ss/<search_term>')
+def semantic_search(search_term):
+    df = pd.read_parquet('./dataset/stok_kodu.parquet')
+
+    dictionary = gensim.corpora.Dictionary.load("./models/dictionary")
+    malzeme_index = gensim.similarities.MatrixSimilarity.load(
+        "./models/malzeme_index")
+
+    # Load TFIDF and LSI models
+    ebebek_tfidf_model = gensim.models.TfidfModel.load(
+        "./models/tfidf/ebebek_tfidf")
+    ebebek_lsi_model = gensim.models.LsiModel.load("./models/lsi/ebebek_lsi")
+
+    similar_products = search_similar_products(search_term, dictionary, ebebek_tfidf_model, ebebek_lsi_model, malzeme_index, df, 5)
+    return similar_products
+
+@app.route('/correct/<search_term>')
+def correct(search_term):
+
+    bow_str = ' '.join(WORDS.keys()) 
+    
+    a = [correction(word) for word in search_term.split()]
+    output = ''
+    for i in a:
+        output += i + ' ' 
+    return output
+
+@app.route('/ss_correct/<search_term>')
+def semantic_search_correct(search_term):
+    search_term = correct(search_term)
+    similar_products = semantic_search(search_term)
+    return similar_products
+
+def P(word, N=sum(WORDS.values())): 
+    "Probability of `word`."
+    return WORDS[word] / N
+
+def correction(word): 
+    "Most probable spelling correction for word."
+    if word in ['1','2','3','4','5','6','7','8','9']: return word
+    else: return max(candidates(word), key=P)
+
+def candidates(word): 
+    "Generate possible spelling corrections for word."
+    return (known([word]) or known(edits1(word)) or known(edits2(word)) or [word])
+def known(words): 
+    "The subset of `words` that appear in the dictionary of WORDS."
+    return set(w for w in words if w in WORDS)
+
+def edits1(word):
+    "All edits that are one edit away from `word`."
+    letters    = 'abcçdefgğhıijklmnoöpqrsştuüvwxyz'
+    eng_tr     = {'c':'ç', 'g':'ğ', 'i':'ı', 'o':'ö', 's':'ş', 'u':'ü'}
+    splits     = [(word[:i], word[i:])    for i in range(len(word) + 1)]
+    deletes    = [L + R[1:]               for L, R in splits if R]
+    transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R)>1]
+    replaces   = [L + c + R[1:]           for L, R in splits if R for c in letters]
+    inserts    = [L + c + R               for L, R in splits for c in letters]
+    engs       = [word.replace(k,v)       for (k, v) in eng_tr.items() if k in word]
+    return set(deletes + transposes + replaces + inserts + engs)
+
+def edits2(word): 
+    "All edits that are two edits away from `word`."
+    return (e2 for e1 in edits1(word) for e2 in edits1(e1))
+
+def recommendation(word):
+
+    if word in ['1','2','3','4','5','6','7','8','9']: return word
+    "Regex pattern for starting with the words first three letters"
+    pattern = rf'\s({word}\w+)\s'  
+    
+    "Found words corresponding the pattern"
+    found = re.findall(pattern, bow_str)
+    found = list(dict.fromkeys(found))
+    found.append(word)
+    
+    "Candidates is key and values of found words in 'bow_str'"
+    candidates_rec = {w:WORDS[w] for w in found}
+    if candidates_rec == {}:
+        candidates_rec = {w:WORDS[w] for w in known(edits1(word))}     
+    if candidates_rec == {}:
+        candidates_rec = {w:WORDS[w] for w in known(edits2(word))}   
+    
+        
+    cor = candidates(word)
+    candidates_cor = {w:WORDS[w] for w in cor}
+        
+    "Highest valued key is reccomended"
+    output1 = max(candidates_rec, key=P)
+    output2 = max(candidates_cor, key=P)
+    output = max([output1, output2], key=P)
+    return output
+
+
+
+def filter(query):
+    # Remove puncuations
+    query = re.sub(r'[^\w\s]', ' ', query)
+
+    # Remove extra spaces
+    query = re.sub(' +', ' ', query)
+
+    # Get tokens
+    tokens = spacy_nlp(query)
+
+    # Lower, strip and lemmatize
+    tokens = [word.text.lower().strip() for word in tokens]
+
+    # Remove stopwords, and exclude words less than 2 characters
+    tokens = [word for word in tokens if
+            (word not in stop_words) and
+            (word not in punctuations) and
+            (word in NUMBERS or len(word) >= 2) and
+            (word != "yok") and
+            (word != "nan")]
+
+    # Stem tokens - Does not works well :(
+    # tokens = [stemmer.stem(word) for word in tokens]
+
+    return tokens
+
+def search_similar_products(search_term, dictionary, ebebek_tfidf_model, ebebek_lsi_model, malzeme_index, df, num_best=100):
+    query_bow = dictionary.doc2bow(filter(search_term))
+    query_tfidf = ebebek_tfidf_model[query_bow]
+    query_lsi = ebebek_lsi_model[query_tfidf]
+
+    malzeme_index.num_best = num_best
+
+    malzeme_list = malzeme_index[query_lsi]
+
+    malzeme_list.sort(key=itemgetter(1), reverse=True)
+    malzeme_names = []
+
+    for j, malzeme in enumerate(malzeme_list):
+
+        malzeme_names.append(df['STOK_ADI'][malzeme[0]])
+
+        if j == (malzeme_index.num_best-1):
+            break
+    return malzeme_names
+        # STOK_KODU Eklenecek
+
+if __name__ == '__main__':
+  app.run(port=5500)
